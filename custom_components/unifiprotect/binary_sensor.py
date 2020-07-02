@@ -1,97 +1,118 @@
 """ This component provides binary sensors for Unifi Protect."""
 import logging
-import voluptuous as vol
-from datetime import timedelta
 
-import homeassistant.helpers.config_validation as cv
-from homeassistant.components.binary_sensor import BinarySensorDevice
-from homeassistant.const import ATTR_ATTRIBUTION, ATTR_FRIENDLY_NAME, CONF_MONITORED_CONDITIONS
-from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
-from . import UPV_DATA, DEFAULT_ATTRIBUTION, DEFAULT_BRAND
+try:
+    from homeassistant.components.binary_sensor import (
+        BinarySensorEntity as BinarySensorDevice,
+    )
+except ImportError:
+    # Prior to HA v0.110
+    from homeassistant.components.binary_sensor import BinarySensorDevice
+
+from homeassistant.components.binary_sensor import DEVICE_CLASS_MOTION
+from homeassistant.const import (
+    ATTR_ATTRIBUTION,
+    ATTR_LAST_TRIP_TIME,
+)
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.typing import HomeAssistantType
+from homeassistant.util import slugify
+from .const import (
+    ATTR_EVENT_SCORE,
+    ATTR_EVENT_LENGTH,
+    DOMAIN,
+    DEFAULT_ATTRIBUTION,
+    DEVICE_CLASS_DOORBELL,
+)
+from .entity import UnifiProtectEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-DEPENDENCIES = ["unifiprotect"]
 
-# Update Frequently as we are only reading from Memory
-SCAN_INTERVAL = timedelta(seconds=2)
-
-ATTR_BRAND = "brand"
-ATTR_MOTION_SCORE = "motion_score"
-
-# sensor_type [ description, unit, icon ]
-SENSOR_TYPES = {"motion": ["Motion", "motion", "motionDetected"]}
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    {
-        vol.Required(CONF_MONITORED_CONDITIONS, default=list(SENSOR_TYPES)): vol.All(
-            cv.ensure_list, [vol.In(SENSOR_TYPES)]
-        ),
-    }
-)
-
-
-async def async_setup_platform(hass, config, async_add_entities, _discovery_info=None):
-    """Set up an Unifi Protect binary sensor."""
-    data = hass.data[UPV_DATA]
-    if not data:
+async def async_setup_entry(
+    hass: HomeAssistantType, entry: ConfigEntry, async_add_entities
+) -> None:
+    """A Ubiquiti Unifi Protect Binary Sensor."""
+    upv_object = hass.data[DOMAIN][entry.entry_id]["upv"]
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    if not coordinator.data:
         return
 
     sensors = []
-    for sensor_type in config.get(CONF_MONITORED_CONDITIONS):
-        for camera in data.devices:
-            sensors.append(UfpBinarySensor(data, camera, sensor_type))
+    for camera in coordinator.data:
+        if coordinator.data[camera]["type"] == DEVICE_CLASS_DOORBELL:
+            sensors.append(
+                UnifiProtectBinarySensor(
+                    upv_object, coordinator, camera, DEVICE_CLASS_DOORBELL
+                )
+            )
+            _LOGGER.debug(
+                "UNIFIPROTECT DOORBELL SENSOR CREATED: %s",
+                coordinator.data[camera]["name"],
+            )
+
+        sensors.append(
+            UnifiProtectBinarySensor(
+                upv_object, coordinator, camera, DEVICE_CLASS_MOTION
+            )
+        )
+        _LOGGER.debug(
+            "UNIFIPROTECT MOTION SENSOR CREATED: %s", coordinator.data[camera]["name"]
+        )
 
     async_add_entities(sensors, True)
 
+    return True
 
-class UfpBinarySensor(BinarySensorDevice):
+
+class UnifiProtectBinarySensor(UnifiProtectEntity, BinarySensorDevice):
     """A Unifi Protect Binary Sensor."""
 
-    def __init__(self, data, camera, sensor_type):
-        """Initialize an Arlo sensor."""
-        self.data = data
-        self._camera_id = camera
-        self._camera = self.data.devices[camera]
-        self._name = "{0} {1}".format(SENSOR_TYPES[sensor_type][0], self._camera["name"])
-        self._unique_id = self._name.lower().replace(" ", "_")
-        self._sensor_type = sensor_type
-        self._motion_score = self._camera["motion_score"]
-        self._state = False
-        self._class = SENSOR_TYPES.get(self._sensor_type)[1]
-        self._attr = SENSOR_TYPES.get(self._sensor_type)[2]
-        _LOGGER.debug("UfpBinarySensor: %s created", self._name)
+    def __init__(self, upv_object, coordinator, camera_id, sensor_type):
+        """Initialize the Binary Sensor."""
+        super().__init__(upv_object, coordinator, camera_id, sensor_type)
+        self._name = f"{sensor_type.capitalize()} {self._camera_data['name']}"
+        self._device_class = sensor_type
 
     @property
-    def unique_id(self):
-        """Return a unique ID."""
-        return self._unique_id
+    def name(self):
+        """Return name of the sensor."""
+        return self._name
 
     @property
     def is_on(self):
         """Return true if the binary sensor is on."""
-        return self._state is True
+        if self._device_class == DEVICE_CLASS_DOORBELL:
+            return self._camera_data["event_ring_on"]
+        else:
+            return self._camera_data["event_on"]
 
     @property
     def device_class(self):
         """Return the device class of the sensor."""
-        return self._class
+        return self._device_class
+
+    @property
+    def icon(self):
+        """Select icon to display in Frontend."""
+        if self._device_class == DEVICE_CLASS_DOORBELL:
+            if self._camera_data["event_ring_on"]:
+                return "mdi:bell-ring-outline"
+            else:
+                return "mdi:doorbell-video"
 
     @property
     def device_state_attributes(self):
         """Return the device state attributes."""
-        attrs = {}
-
-        attrs[ATTR_ATTRIBUTION] = DEFAULT_ATTRIBUTION
-        attrs[ATTR_BRAND] = DEFAULT_BRAND
-        attrs[ATTR_FRIENDLY_NAME] = self._name
-        attrs[ATTR_MOTION_SCORE] = self._motion_score
-
-        return attrs
-
-    def update(self):
-        """ Updates Motions State."""
-
-        self._state = self._camera["motion_on"]
-        self._motion_score = self._camera["motion_score"]
-
+        if self._device_class == DEVICE_CLASS_DOORBELL:
+            return {
+                ATTR_ATTRIBUTION: DEFAULT_ATTRIBUTION,
+                ATTR_LAST_TRIP_TIME: self._camera_data["last_ring"],
+            }
+        else:
+            return {
+                ATTR_ATTRIBUTION: DEFAULT_ATTRIBUTION,
+                ATTR_LAST_TRIP_TIME: self._camera_data["last_motion"],
+                ATTR_EVENT_SCORE: self._camera_data["event_score"],
+                ATTR_EVENT_LENGTH: self._camera_data["event_length"],
+            }

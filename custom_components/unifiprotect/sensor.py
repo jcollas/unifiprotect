@@ -1,87 +1,79 @@
 """ This component provides sensors for Unifi Protect."""
 import logging
-import voluptuous as vol
-from datetime import timedelta
 
-import homeassistant.helpers.config_validation as cv
-from homeassistant.const import ATTR_ATTRIBUTION, ATTR_FRIENDLY_NAME, CONF_MONITORED_CONDITIONS
-from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
 from homeassistant.helpers.entity import Entity
-from . import UPV_DATA, DEFAULT_ATTRIBUTION, DEFAULT_BRAND, TYPE_RECORD_NEVER
+from homeassistant.const import ATTR_ATTRIBUTION
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.typing import HomeAssistantType
+from .const import (
+    ATTR_CAMERA_TYPE,
+    ATTR_EVENT_SCORE,
+    DOMAIN,
+    DEFAULT_ATTRIBUTION,
+    TYPE_RECORD_NEVER,
+)
+from .entity import UnifiProtectEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-DEPENDENCIES = ["unifiprotect"]
-
-# Update Frequently as we are only reading from Memory
-SCAN_INTERVAL = timedelta(seconds=10)
-
-ATTR_CAMERA_TYPE = "camera_type"
-ATTR_BRAND = "brand"
-
 SENSOR_TYPES = {
-    "motion_recording": ["Motion Recording", None, "camcorder", "motion_recording"]
+    "motion_recording": ["Motion Recording", None, "video-outline,video-off-outline"]
 }
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    {
-        vol.Required(CONF_MONITORED_CONDITIONS, default=list(SENSOR_TYPES)): vol.All(
-            cv.ensure_list, [vol.In(SENSOR_TYPES)]
-        ),
-    }
-)
 
-
-async def async_setup_platform(hass, config, async_add_entities, _discovery_info=None):
-    """Set up an Unifi Protect sensor."""
-    data = hass.data[UPV_DATA]
-    if not data:
+async def async_setup_entry(
+    hass: HomeAssistantType, entry: ConfigEntry, async_add_entities
+) -> None:
+    """A Ubiquiti Unifi Protect Sensor."""
+    upv_object = hass.data[DOMAIN][entry.entry_id]["upv"]
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    if not coordinator.data:
         return
 
     sensors = []
-    for sensor_type in config.get(CONF_MONITORED_CONDITIONS):
-        for camera in data.devices:
-            sensors.append(UnifiProtectSensor(data, camera, sensor_type))
+    for sensor in SENSOR_TYPES:
+        for camera in coordinator.data:
+            sensors.append(UnifiProtectSensor(upv_object, coordinator, camera, sensor))
+            _LOGGER.debug("UNIFIPROTECT SENSOR CREATED: %s", sensor)
 
     async_add_entities(sensors, True)
 
+    return True
 
-class UnifiProtectSensor(Entity):
-    """A Unifi Protect Binary Sensor."""
 
-    def __init__(self, data, camera, sensor_type):
+class UnifiProtectSensor(UnifiProtectEntity, Entity):
+    """A Ubiquiti Unifi Protect Sensor."""
+
+    def __init__(self, upv_object, coordinator, camera_id, sensor):
         """Initialize an Unifi Protect sensor."""
-        self.data = data
-        self._camera_id = camera
-        self._camera = self.data.devices[camera]
-        self._name = "{0} {1}".format(SENSOR_TYPES[sensor_type][0], self._camera["name"])
-        self._unique_id = self._name.lower().replace(" ", "_")
-        self._sensor_type = sensor_type
-        self._icon = "mdi:{}".format(SENSOR_TYPES.get(self._sensor_type)[2])
-        self._state = None
-        self._camera_type = self._camera["type"]
-        self._attr = SENSOR_TYPES.get(self._sensor_type)[3]
-        _LOGGER.debug("UnifiProtectSensor: %s created", self._name)
+        super().__init__(upv_object, coordinator, camera_id, sensor)
+        self._name = f"{SENSOR_TYPES[sensor][0]} {self._camera_data['name']}"
+        self._units = SENSOR_TYPES[sensor][1]
+        self._icons = SENSOR_TYPES[sensor][2]
+        self._camera_type = self._camera_data["model"]
 
     @property
-    def unique_id(self):
-        """Return a unique ID."""
-        return self._unique_id
+    def name(self):
+        """Return name of the sensor."""
+        return self._name
 
     @property
     def state(self):
         """Return the state of the sensor."""
-        return self._state
+        return self._camera_data["recording_mode"]
 
     @property
     def icon(self):
         """Icon to use in the frontend, if any."""
-        return self._icon
+        icons = self._icons.split(",")
+        return (
+            f"mdi:{icons[0]}" if self.state != TYPE_RECORD_NEVER else f"mdi:{icons[1]}"
+        )
 
     @property
     def unit_of_measurement(self):
         """Return the units of measurement."""
-        return SENSOR_TYPES.get(self._sensor_type)[1]
+        return self._units
 
     @property
     def device_class(self):
@@ -91,17 +83,7 @@ class UnifiProtectSensor(Entity):
     @property
     def device_state_attributes(self):
         """Return the device state attributes."""
-        attrs = {}
-
-        attrs[ATTR_ATTRIBUTION] = DEFAULT_ATTRIBUTION
-        attrs[ATTR_BRAND] = DEFAULT_BRAND
-        attrs[ATTR_CAMERA_TYPE] = self._camera_type
-        attrs[ATTR_FRIENDLY_NAME] = self._name
-
-        return attrs
-
-    def update(self):
-        """ Updates Motions State."""
-
-        self._state = self._camera["recording_mode"]
-        self._icon = "mdi:camcorder" if self._state != TYPE_RECORD_NEVER else "mdi:camcorder-off"
+        return {
+            ATTR_ATTRIBUTION: DEFAULT_ATTRIBUTION,
+            ATTR_CAMERA_TYPE: self._camera_type,
+        }
